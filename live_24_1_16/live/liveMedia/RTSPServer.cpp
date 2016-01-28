@@ -25,6 +25,8 @@ along with this library; if not, write to the Free Software Foundation, Inc.,
 #include "Base64.hh"
 #include <GroupsockHelper.hh>
 
+
+#define DEBUG
 ////////// RTSPServer implementation //////////
 
 RTSPServer*
@@ -213,6 +215,17 @@ void RTSPServer::implementCmd_REGISTER(char const* /*url*/, char const* /*urlSuf
   // By default, this function is a 'noop'
 }
 
+
+Boolean RTSPServer::weImplementDEREGISTER(char const* /*proxyURLSuffix*/, char*& responseStr) {
+	// By default, servers do not implement our custom "DEREGISTER" command:
+	responseStr = NULL;
+	return False;
+}
+
+void RTSPServer::implementCmd_DEREGISTER(char const* /*proxyURLSuffix*/) {
+	// By default, this function is a 'noop'
+}
+
 UserAuthenticationDatabase* RTSPServer::getAuthenticationDatabaseForCommand(char const* /*cmdName*/) {
   // default implementation
   return fAuthDB;
@@ -395,6 +408,15 @@ RTSPServer::RTSPClientConnection::ParamsForREGISTER::~ParamsForREGISTER() {
   delete[] fURL; delete[] fURLSuffix; delete[] fProxyURLSuffix;
 }
 
+RTSPServer::RTSPClientConnection::ParamsForDEREGISTER
+::ParamsForDEREGISTER(RTSPServer::RTSPClientConnection* ourConnection, char const* proxyURLSuffix)
+: fOurConnection(ourConnection), fProxyURLSuffix(strDup(proxyURLSuffix)) {
+}
+
+RTSPServer::RTSPClientConnection::ParamsForDEREGISTER::~ParamsForDEREGISTER() {
+	delete[] fProxyURLSuffix;
+}
+
 // Handler routines for specific RTSP commands:
 
 void RTSPServer::RTSPClientConnection::handleCmd_OPTIONS() {
@@ -533,6 +555,32 @@ void RTSPServer
   } else {
     handleCmd_notSupported();
   }
+}
+
+void RTSPServer
+::RTSPClientConnection::handleCmd_DEREGISTER(char const* urlSuffix, char const* fullRequestStr, char const* proxyURLSuffix){
+	char* responseStr;
+
+	//If we implement REGISTER command we also support DEREGISTER.
+	if (fOurRTSPServer.weImplementDEREGISTER(proxyURLSuffix, responseStr)) {
+		//The "DEREGISTER" command - if we implement it - may require access control:
+		if (!authenticationOK("DEREGISTER", urlSuffix, fullRequestStr)) return;
+
+		// We implement the "DEREGISTER" command by first replying to it, then actually handling it
+		// (in a separate event-loop task, that will get called after the reply has been done):
+		setRTSPResponse(responseStr == NULL ? "200 OK" : responseStr);
+		delete[] responseStr;
+
+		ParamsForDEREGISTER* deregisterParams = new ParamsForDEREGISTER(this, proxyURLSuffix);
+		envir().taskScheduler().scheduleDelayedTask(0, (TaskFunc*)continueHandlingDEREGISTER, deregisterParams);
+	}
+	else if (responseStr != NULL) {
+		setRTSPResponse(responseStr);
+		delete[] responseStr;
+	}
+	else {
+		handleCmd_notSupported();
+	}
 }
 
 void RTSPServer::RTSPClientConnection::handleCmd_bad() {
@@ -736,7 +784,6 @@ void RTSPServer::RTSPClientConnection::handleAlternativeRequestByte1(u_int8_t re
   }
 }
 
-// A special version of "parseTransportHeader()", used just for parsing the "Transport:" header in an incoming "REGISTER" command:
 static void parseTransportHeaderForREGISTER(char const* buf,
 					    Boolean &reuseConnection,
 					    Boolean& deliverViaTCP,
@@ -766,6 +813,7 @@ static void parseTransportHeaderForREGISTER(char const* buf,
     } else if (_strncasecmp(field, "preferred_delivery_protocol=interleaved", 39) == 0) {
       deliverViaTCP = True;
     } else if (_strncasecmp(field, "proxy_url_suffix=", 17) == 0) {
+      fprintf(stderr,"found proxy url suffix\n");
       delete[] proxyURLSuffix;
       proxyURLSuffix = strDup(field+17);
     }
@@ -976,7 +1024,21 @@ void RTSPServer::RTSPClientConnection::handleRequestBytes(int newBytesRead) {
 	  handleCmd_bad();
 	}
 	delete[] url;
-      } else {
+    } else if (strcmp(cmdName, "DEREGISTER") == 0) {
+	 char* url = strDupSize((char*)fRequestBuffer);
+	 if (sscanf((char*)fRequestBuffer, "%*s %s", url) == 1) {
+	  Boolean reuseConnection, deliverViaTCP;
+	  char* proxyURLSuffix;
+	  parseTransportHeaderForREGISTER((const char*)fRequestBuffer, reuseConnection, deliverViaTCP, proxyURLSuffix);
+
+	  handleCmd_DEREGISTER(urlSuffix, (char const*)fRequestBuffer, proxyURLSuffix);
+	  delete[] proxyURLSuffix;
+	 }
+	 else {
+	  handleCmd_bad();
+	 }
+	  delete[] url;
+	 } else {
 	// The command is one that we don't handle:
 	handleCmd_notSupported();
       }
@@ -1295,6 +1357,17 @@ void RTSPServer::RTSPClientConnection::continueHandlingREGISTER1(ParamsForREGIST
   delete params;
 }
 
+void RTSPServer::RTSPClientConnection::continueHandlingDEREGISTER(ParamsForDEREGISTER* params) {
+	params->fOurConnection->continueHandlingDEREGISTER1(params);
+}
+
+void RTSPServer::RTSPClientConnection::continueHandlingDEREGISTER1(ParamsForDEREGISTER* params) {
+
+	RTSPServer* ourServer = &fOurRTSPServer; // copy the pointer now, in case we "delete this" below
+
+	ourServer->implementCmd_DEREGISTER(params->fProxyURLSuffix);
+	delete params;
+}
 
 ////////// RTSPServer::RTSPClientSession implementation //////////
 
@@ -1772,7 +1845,7 @@ void RTSPServer::RTSPClientSession
       }
     }
   }
-  
+ 
   setRTSPResponse(ourClientConnection, "200 OK");
   
   // Optimization: If all subsessions have now been torn down, then we know that we can reclaim our object now.
@@ -2073,7 +2146,7 @@ RTSPServerWithREGISTERProxying::~RTSPServerWithREGISTERProxying() {
 char const* RTSPServerWithREGISTERProxying::allowedCommandNames() {
   if (fAllowedCommandNames == NULL) {
     char const* baseAllowedCommandNames = RTSPServer::allowedCommandNames();
-    char const* newAllowedCommandName = ", REGISTER";
+	char const* newAllowedCommandName = ", REGISTER, DEREGISTER";
     fAllowedCommandNames = new char[strlen(baseAllowedCommandNames) + strlen(newAllowedCommandName) + 1/* for '\0' */];
     sprintf(fAllowedCommandNames, "%s%s", baseAllowedCommandNames, newAllowedCommandName);
   }
@@ -2116,6 +2189,8 @@ void RTSPServerWithREGISTERProxying::implementCmd_REGISTER(char const* url, char
   portNumBits tunnelOverHTTPPortNum = deliverViaTCP ? (portNumBits)(~0) : 0;
       // We don't support streaming from the back-end via RTSP/RTP/RTCP-over-HTTP; only via RTP/RTCP-over-TCP or RTP/RTCP-over-UDP
 
+  envir() << "Registring proxy url: " << proxyStreamName << "\n" ;
+
   ServerMediaSession* sms
     = ProxyServerMediaSession::createNew(envir(), this, url, proxyStreamName, NULL, NULL,
 					 tunnelOverHTTPPortNum, fVerbosityLevelForProxying, socketToRemoteServer);
@@ -2126,6 +2201,30 @@ void RTSPServerWithREGISTERProxying::implementCmd_REGISTER(char const* url, char
   envir() << "Proxying the registered back-end stream \"" << url << "\".\n";
   envir() << "\tPlay this stream using the URL: " << proxyStreamURL << "\n";
   delete[] proxyStreamURL;
+}
+
+Boolean RTSPServerWithREGISTERProxying::weImplementDEREGISTER(char const* proxyURLSuffix, char*& responseStr) {
+	// First, check whether we have already proxied a stream as "proxyURLSuffix":
+	envir() << "proxyURLSuffix:" << proxyURLSuffix << "\n";
+	if (proxyURLSuffix != NULL && lookupServerMediaSession(proxyURLSuffix) == NULL) {
+		responseStr = strDup("451 Invalid parameter");
+		return False;
+	}
+
+	// Otherwise, we will implement it:
+	responseStr = NULL;
+	return True;
+}
+
+void RTSPServerWithREGISTERProxying::implementCmd_DEREGISTER(char const* proxyURLSuffix)
+{
+	if(proxyURLSuffix!=NULL){
+	closeAllClientSessionsForServerMediaSession(proxyURLSuffix);
+	removeServerMediaSession(proxyURLSuffix);
+	envir() << "Removing proxy stream with suffix: " << proxyURLSuffix << "\n";
+	} else {
+	envir() << "proxyURLSuffix found null\n";	
+	}
 }
 
 UserAuthenticationDatabase* RTSPServerWithREGISTERProxying::getAuthenticationDatabaseForCommand(char const* cmdName) {

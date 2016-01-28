@@ -283,7 +283,7 @@ void ProxyRTSPClient::continueAfterDESCRIBE(char const* sdpDescription) {
   } else {
     // The "DESCRIBE" command failed, most likely because the server or the stream is not yet running.
     // Reschedule another "DESCRIBE" command to take place later:
-    scheduleDESCRIBECommand();
+    scheduleDESCRIBECommand(); //HArdik Changed this
   }
 }
 
@@ -601,9 +601,18 @@ void ProxyServerMediaSubsession::closeStreamSource(FramedSource* inputSource) {
     ProxyServerMediaSession* const sms = (ProxyServerMediaSession*)fParentSession;
     ProxyRTSPClient* const proxyRTSPClient = sms->fProxyRTSPClient;
     if (proxyRTSPClient->fLastCommandWasPLAY) { // so that we send only one "PAUSE"; not one for each subsession
-      proxyRTSPClient->sendPauseCommand(fClientMediaSubsession.parentSession(), NULL, proxyRTSPClient->auth());
-      proxyRTSPClient->fLastCommandWasPLAY = False;
-    }
+      proxyRTSPClient->sendTeardownCommand(fClientMediaSubsession.parentSession(), NULL, proxyRTSPClient->auth());
+     proxyRTSPClient->fLastCommandWasPLAY = False;
+    // proxyRTSPClient->~ProxyRTSPClient();
+ 	char const* stream_name = sms->ServerMediaSession::streamName();
+        envir() << "stream_name" << stream_name << "\n";
+//	sms->fOurMediaServer->deleteServerMediaSession(stream_name);
+//	closeAllClientSessionsForServerMediaSession(proxyURLSuffix);
+	if(stream_name != NULL){
+	sms->fOurMediaServer->removeServerMediaSession(stream_name);
+	}
+     }
+ 
   }
 }
 
